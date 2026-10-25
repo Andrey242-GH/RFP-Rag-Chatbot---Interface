@@ -1,0 +1,156 @@
+/**
+ * Amazon Bedrock client — server-only.
+ *
+ * Exposes:
+ *   invokeModel()         — synchronous model invocation (generation, evaluation)
+ *   invokeModelStream()   — streaming model invocation (chat)
+ *   generateEmbedding()   — Titan Embed v2 vector generation
+ */
+import "server-only";
+import {
+  BedrockRuntimeClient,
+  InvokeModelCommand,
+  InvokeModelWithResponseStreamCommand,
+} from "@aws-sdk/client-bedrock-runtime";
+
+const bedrock = new BedrockRuntimeClient({
+  region: process.env.AWS_REGION ?? "us-east-1",
+  ...(process.env.AWS_ACCESS_KEY_ID
+    ? {
+        credentials: {
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "",
+          sessionToken: process.env.AWS_SESSION_TOKEN,
+        },
+      }
+    : {}),
+});
+
+export const GENERATION_MODEL =
+  process.env.BEDROCK_GENERATION_MODEL ??
+  "anthropic.claude-3-5-sonnet-20241022-v2:0";
+export const EVALUATION_MODEL =
+  process.env.BEDROCK_EVALUATION_MODEL ??
+  "anthropic.claude-3-opus-20240229-v1:0";
+export const EMBEDDING_MODEL =
+  process.env.BEDROCK_EMBEDDING_MODEL ?? "amazon.titan-embed-text-v2:0";
+
+// ─── Types ────────────────────────────────────────────────────
+
+export interface ClaudeMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ClaudeInvokeOptions {
+  modelId?: string;
+  systemPrompt?: string;
+  messages: ClaudeMessage[];
+  maxTokens?: number;
+  temperature?: number;
+}
+
+// ─── Synchronous invocation ───────────────────────────────────
+
+export async function invokeModel(options: ClaudeInvokeOptions): Promise<string> {
+  const {
+    modelId = GENERATION_MODEL,
+    systemPrompt,
+    messages,
+    maxTokens = 4096,
+    temperature = 0.3,
+  } = options;
+
+  const body: Record<string, unknown> = {
+    anthropic_version: "bedrock-2023-05-31",
+    max_tokens: maxTokens,
+    temperature,
+    messages,
+  };
+  if (systemPrompt) body.system = systemPrompt;
+
+  const command = new InvokeModelCommand({
+    modelId,
+    contentType: "application/json",
+    accept: "application/json",
+    body: JSON.stringify(body),
+  });
+
+  const response = await bedrock.send(command);
+  const result = JSON.parse(new TextDecoder().decode(response.body)) as {
+    content: { type: string; text: string }[];
+  };
+
+  return result.content
+    .filter((c) => c.type === "text")
+    .map((c) => c.text)
+    .join("");
+}
+
+// ─── Streaming invocation ─────────────────────────────────────
+
+export async function* invokeModelStream(
+  options: ClaudeInvokeOptions
+): AsyncGenerator<string> {
+  const {
+    modelId = GENERATION_MODEL,
+    systemPrompt,
+    messages,
+    maxTokens = 4096,
+    temperature = 0.3,
+  } = options;
+
+  const body: Record<string, unknown> = {
+    anthropic_version: "bedrock-2023-05-31",
+    max_tokens: maxTokens,
+    temperature,
+    messages,
+  };
+  if (systemPrompt) body.system = systemPrompt;
+
+  const command = new InvokeModelWithResponseStreamCommand({
+    modelId,
+    contentType: "application/json",
+    accept: "application/json",
+    body: JSON.stringify(body),
+  });
+
+  const response = await bedrock.send(command);
+  if (!response.body) return;
+
+  for await (const event of response.body) {
+    if (event.chunk?.bytes) {
+      const chunk = JSON.parse(new TextDecoder().decode(event.chunk.bytes)) as {
+        type: string;
+        delta?: { type: string; text: string };
+      };
+      if (chunk.type === "content_block_delta" && chunk.delta?.type === "text_delta") {
+        yield chunk.delta.text;
+      }
+    }
+  }
+}
+
+// ─── Embedding generation ─────────────────────────────────────
+
+export async function generateEmbedding(text: string): Promise<number[]> {
+  // Titan Embed v2 max input is 8192 tokens; truncate long text
+  const truncated = text.slice(0, 25000);
+
+  const command = new InvokeModelCommand({
+    modelId: EMBEDDING_MODEL,
+    contentType: "application/json",
+    accept: "application/json",
+    body: JSON.stringify({
+      inputText: truncated,
+      dimensions: 1024,
+      normalize: true,
+    }),
+  });
+
+  const response = await bedrock.send(command);
+  const result = JSON.parse(new TextDecoder().decode(response.body)) as {
+    embedding: number[];
+  };
+  return result.embedding;
+}
