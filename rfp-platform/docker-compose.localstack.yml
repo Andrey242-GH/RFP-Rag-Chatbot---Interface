@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: rfp-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=dynamodb,s3
+      - DEBUG=0
+      - AWS_DEFAULT_REGION=us-east-1
+      - PERSISTENCE=0
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s

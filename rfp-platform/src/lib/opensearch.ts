@@ -19,6 +19,10 @@ import type { KnowledgeQualityLevel, RetrievedSource } from "@/types";
 export const OPENSEARCH_INDEX = process.env.OPENSEARCH_INDEX ?? "rfp-knowledge-base";
 const EMBEDDING_DIMENSIONS = 1024;
 
+// Set OPENSEARCH_MOCK=true in .env.local to use an in-memory store instead of real OpenSearch
+const IS_MOCK = process.env.OPENSEARCH_MOCK === "true";
+const _mockStore = new Map<string, KnowledgeIndexDocument>();
+
 // ─── Client ───────────────────────────────────────────────────
 
 function createClient(): Client {
@@ -62,6 +66,7 @@ export interface KnowledgeIndexDocument {
 }
 
 export async function ensureIndexExists(): Promise<void> {
+  if (IS_MOCK) return;
   const client = getClient();
   const exists = await client.indices.exists({ index: OPENSEARCH_INDEX });
   if (exists.body) return;
@@ -108,6 +113,7 @@ export async function ensureIndexExists(): Promise<void> {
 // ─── Indexing ─────────────────────────────────────────────────
 
 export async function indexDocument(doc: KnowledgeIndexDocument): Promise<void> {
+  if (IS_MOCK) { _mockStore.set(doc.id, doc); return; }
   const client = getClient();
   await client.index({
     index: OPENSEARCH_INDEX,
@@ -118,6 +124,7 @@ export async function indexDocument(doc: KnowledgeIndexDocument): Promise<void> 
 }
 
 export async function deleteDocument(id: string): Promise<void> {
+  if (IS_MOCK) { _mockStore.delete(id); return; }
   const client = getClient();
   await client.delete({ index: OPENSEARCH_INDEX, id, refresh: "wait_for" });
 }
@@ -150,6 +157,29 @@ export interface SearchHit {
 
 export async function hybridSearch(options: HybridSearchOptions): Promise<SearchHit[]> {
   const { queryVector, queryText, topK = 10, industry, domain, minQualityLevel } = options;
+
+  if (IS_MOCK) {
+    const q = queryText.toLowerCase();
+    return Array.from(_mockStore.values())
+      .filter((d) => {
+        if (industry && d.industry !== industry) return false;
+        if (domain && d.domain !== domain) return false;
+        if (minQualityLevel && d.qualityLevel < minQualityLevel) return false;
+        return true;
+      })
+      .map((d) => {
+        const text = `${d.question} ${d.answer}`.toLowerCase();
+        const words = q.split(/\s+/).filter(Boolean);
+        const score = words.length ? words.filter((w) => text.includes(w)).length / words.length : 0;
+        const boost = QUALITY_RETRIEVAL_BOOST[d.qualityLevel] ?? 1.0;
+        return { id: d.id, question: d.question, answer: d.answer, industry: d.industry,
+          customer: d.customer, region: d.region, domain: d.domain, proposalStatus: d.proposalStatus,
+          qualityLevel: d.qualityLevel, vectorScore: score, keywordScore: score, boostedScore: score * boost };
+      })
+      .sort((a, b) => b.boostedScore - a.boostedScore)
+      .slice(0, topK);
+  }
+
   const client = getClient();
 
   // Build optional filters

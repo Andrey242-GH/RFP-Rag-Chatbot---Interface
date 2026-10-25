@@ -35,6 +35,46 @@ export const EVALUATION_MODEL =
 export const EMBEDDING_MODEL =
   process.env.BEDROCK_EMBEDDING_MODEL ?? "amazon.titan-embed-text-v2:0";
 
+// Set BEDROCK_MOCK=true in .env.local to skip real AWS calls during local dev
+const IS_MOCK = process.env.BEDROCK_MOCK === "true";
+
+// ─── Mock helpers ─────────────────────────────────────────────
+
+function mockInvokeModel(options: ClaudeInvokeOptions): string {
+  const lastMsg = options.messages.filter((m) => m.role === "user").at(-1)?.content ?? "";
+
+  if (options.modelId === EVALUATION_MODEL || lastMsg.includes("evaluat") || lastMsg.includes("score")) {
+    return JSON.stringify({
+      score: 4,
+      rationale: "[MOCK] Simulated evaluation — Bedrock not connected in local dev.",
+      suggestions: ["Add specific metrics", "Include customer references"],
+    });
+  }
+  if (lastMsg.includes("extract") || options.systemPrompt?.includes("question")) {
+    return JSON.stringify([
+      { question: "[MOCK] What is your company experience in this domain?", category: "Experience" },
+      { question: "[MOCK] Describe your implementation timeline.", category: "Timeline" },
+      { question: "[MOCK] What is the total cost of ownership?", category: "Pricing" },
+    ]);
+  }
+  return `[MOCK — Bedrock not connected]\n\nThis is a simulated answer for local testing. Set BEDROCK_MOCK=false and add real AWS credentials to use ${GENERATION_MODEL}.`;
+}
+
+async function* mockStream(options: ClaudeInvokeOptions): AsyncGenerator<string> {
+  const text = mockInvokeModel(options);
+  for (const word of text.split(" ")) {
+    yield word + " ";
+    await new Promise((r) => setTimeout(r, 15));
+  }
+}
+
+function mockEmbedding(text: string): number[] {
+  const v = new Array<number>(1024).fill(0);
+  for (let i = 0; i < text.length; i++) v[i % 1024] += text.charCodeAt(i) / 1000;
+  const mag = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
+  return v.map((x) => x / mag);
+}
+
 // ─── Types ────────────────────────────────────────────────────
 
 export interface ClaudeMessage {
@@ -53,6 +93,8 @@ export interface ClaudeInvokeOptions {
 // ─── Synchronous invocation ───────────────────────────────────
 
 export async function invokeModel(options: ClaudeInvokeOptions): Promise<string> {
+  if (IS_MOCK) return mockInvokeModel(options);
+
   const {
     modelId = GENERATION_MODEL,
     systemPrompt,
@@ -92,6 +134,8 @@ export async function invokeModel(options: ClaudeInvokeOptions): Promise<string>
 export async function* invokeModelStream(
   options: ClaudeInvokeOptions
 ): AsyncGenerator<string> {
+  if (IS_MOCK) { yield* mockStream(options); return; }
+
   const {
     modelId = GENERATION_MODEL,
     systemPrompt,
@@ -134,6 +178,8 @@ export async function* invokeModelStream(
 // ─── Embedding generation ─────────────────────────────────────
 
 export async function generateEmbedding(text: string): Promise<number[]> {
+  if (IS_MOCK) return mockEmbedding(text);
+
   // Titan Embed v2 max input is 8192 tokens; truncate long text
   const truncated = text.slice(0, 25000);
 

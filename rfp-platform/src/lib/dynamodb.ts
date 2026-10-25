@@ -13,6 +13,10 @@ import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 
 const client = new DynamoDBClient({
   region: process.env.AWS_REGION ?? "us-east-1",
+  // LocalStack override: set DYNAMODB_ENDPOINT_URL=http://localhost:4566
+  ...(process.env.DYNAMODB_ENDPOINT_URL
+    ? { endpoint: process.env.DYNAMODB_ENDPOINT_URL }
+    : {}),
   ...(process.env.AWS_ACCESS_KEY_ID
     ? {
         credentials: {

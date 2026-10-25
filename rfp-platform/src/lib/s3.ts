@@ -11,6 +11,13 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION ?? "us-east-1",
+  // LocalStack override: set S3_ENDPOINT_URL=http://localhost:4566
+  ...(process.env.S3_ENDPOINT_URL
+    ? {
+        endpoint: process.env.S3_ENDPOINT_URL,
+        forcePathStyle: true, // required for LocalStack
+      }
+    : {}),
   ...(process.env.AWS_ACCESS_KEY_ID
     ? {
         credentials: {
